@@ -92,7 +92,8 @@ sub vcl_recv {
       req.method != "PATCH" &&
       req.method != "DELETE") {
     /* Non-RFC2616 or CONNECT which is weird. */
-    return (pipe);
+    /*Why send the packet upstream, while the visitor is using a non-valid HTTP method? */
+    return (synth(404, "Non-valid HTTP method!"));
   }
 
   # Implementing websocket support (https://www.varnish-cache.org/docs/4.0/users-guide/vcl-example-websockets.html)
@@ -106,12 +107,10 @@ sub vcl_recv {
   }
 
   # Some generic URL manipulation, useful for all templates that follow
-  # First remove the Google Analytics added parameters, useless for our backend
-  if (req.url ~ "(\?|&)(utm_source|utm_medium|utm_campaign|utm_content|gclid|cx|ie|cof|siteurl)=") {
-    set req.url = regsuball(req.url, "&(utm_source|utm_medium|utm_campaign|utm_content|gclid|cx|ie|cof|siteurl)=([A-z0-9_\-\.%25]+)", "");
-    set req.url = regsuball(req.url, "\?(utm_source|utm_medium|utm_campaign|utm_content|gclid|cx|ie|cof|siteurl)=([A-z0-9_\-\.%25]+)", "?");
-    set req.url = regsub(req.url, "\?&", "?");
-    set req.url = regsub(req.url, "\?$", "");
+  # First remove URL parameters used to track effectiveness of online marketing campaigns
+  if (req.url ~ "(\?|&)(utm_[a-z]+|gclid|cx|ie|cof|siteurl|fbclid)=") {
+      set req.url = regsuball(req.url, "(utm_[a-z]+|gclid|cx|ie|cof|siteurl|fbclid)=[-_A-z0-9+()%.]+&?", "");
+      set req.url = regsub(req.url, "[?|&]+$", "");
   }
 
   # Strip hash, server doesn't need it.
@@ -153,16 +152,16 @@ sub vcl_recv {
     unset req.http.cookie;
   }
 
-  if (req.http.Cache-Control ~ "(?i)no-cache") {
+  #if (req.http.Cache-Control ~ "(?i)no-cache") {
   #if (req.http.Cache-Control ~ "(?i)no-cache" && client.ip ~ editors) { # create the acl editors if you want to restrict the Ctrl-F5
   # http://varnish.projects.linpro.no/wiki/VCLExampleEnableForceRefresh
   # Ignore requests via proxy caches and badly behaved crawlers
   # like msnbot that send no-cache with every request.
-    if (! (req.http.Via || req.http.User-Agent ~ "(?i)bot" || req.http.X-Purge)) {
-      #set req.hash_always_miss = true; # Doesn't seems to refresh the object in the cache
-      return(purge); # Couple this with restart in vcl_purge and X-Purge header to avoid loops
-    }
-  }
+  #  if (! (req.http.Via || req.http.User-Agent ~ "(?i)bot" || req.http.X-Purge)) {
+  #    #set req.hash_always_miss = true; # Doesn't seems to refresh the object in the cache
+  #    return (purge); # Couple this with restart in vcl_purge and X-Purge header to avoid loops
+  #  }
+  #}
 
   # Large static files are delivered directly to the end-user without
   # waiting for Varnish to fully read the file first.
@@ -260,7 +259,7 @@ sub vcl_hit {
 # if (!std.healthy(req.backend_hint) && (obj.ttl + obj.grace > 0s)) {
 #   return (deliver);
 # } else {
-#   return (fetch);
+#   return (miss);
 # }
 
   # We have no fresh fish. Lets look at the stale ones.
@@ -271,7 +270,7 @@ sub vcl_hit {
       return (deliver);
     } else {
       # No candidate for grace. Fetch a fresh object.
-      return(fetch);
+      return (fetch);
     }
   } else {
     # backend is sick - use full grace
@@ -331,16 +330,16 @@ sub vcl_backend_response {
     set beresp.http.Location = regsub(beresp.http.Location, ":[0-9]+", "");
   }
 
+  # Don't cache 50x responses
+  if (beresp.status == 500 || beresp.status == 502 || beresp.status == 503 || beresp.status == 504) {
+    return (abandon);
+  }
+
   # Set 2min cache if unset for static files
   if (beresp.ttl <= 0s || beresp.http.Set-Cookie || beresp.http.Vary == "*") {
     set beresp.ttl = 120s; # Important, you shouldn't rely on this, SET YOUR HEADERS in the backend
     set beresp.uncacheable = true;
     return (deliver);
-  }
-
-  # Don't cache 50x responses
-  if (beresp.status == 500 || beresp.status == 502 || beresp.status == 503 || beresp.status == 504) {
-    return (abandon);
   }
 
   # Allow stale content, in case the backend goes down.
@@ -382,10 +381,10 @@ sub vcl_deliver {
 
 sub vcl_purge {
   # Only handle actual PURGE HTTP methods, everything else is discarded
-  if (req.method != "PURGE") {
+  if (req.method == "PURGE") {
     # restart request
     set req.http.X-Purge = "Yes";
-    return(restart);
+    return (restart);
   }
 }
 
